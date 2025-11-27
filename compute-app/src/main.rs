@@ -1,6 +1,4 @@
-use vkl::{piler::{
-    PipelineCreateFlags, PipelineShaderStageCreateFlags, ShaderStageFlags
-}, vk};
+use vkl::vk;
 
 extern crate vkl;
 
@@ -68,8 +66,8 @@ fn main() {
     let compute_stage = vkl::PipelineStage {
         module: &module,
         entrypoint: c"main",
-        stage: ShaderStageFlags::COMPUTE,
-        flags: PipelineShaderStageCreateFlags::empty(),
+        stage: vk::ShaderStageFlags::COMPUTE,
+        flags: vk::PipelineShaderStageCreateFlags::empty(),
     };
 
     let layout = piler.create_pipeline_layout(&[], &[])
@@ -77,7 +75,7 @@ fn main() {
     let compute_pipeline_info = vkl::ComputePipelineInfo {
         layout_ref: layout,
         stage: compute_stage,
-        flags: PipelineCreateFlags::empty(),
+        flags: vk::PipelineCreateFlags::empty(),
     };
     let compute_pipeline = piler.create_compute_pipeline(&compute_pipeline_info)
         .expect("Failed to create compute pipeline");
