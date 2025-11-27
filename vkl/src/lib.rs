@@ -7,10 +7,12 @@ pub mod exts;
 
 #[allow(unused_imports)]
 pub use alloc::{
-    Allocator as DefaultAllocator,
+    Allocator,
     Buffer, BufferInfo, MemMap,
     Texture2d,
 };
+
+pub type DefaultAllocator = Arc<RwLock<Allocator>>;
 
 #[allow(unused_imports)]
 pub use piler::{
@@ -38,7 +40,7 @@ use std::{
     hash::{Hash, RandomState},
     ops::{Deref, Index, Range},
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use ash::{ext, khr, prelude::*};
@@ -1462,18 +1464,23 @@ impl ActiveComputePass<'_> {
     pub fn bind_descriptor_sets(
         &self,
         pipeline_layout: vk::PipelineLayout,
+        bind_point: vk::PipelineBindPoint,
         first_set: u32,
         descriptor_sets: &[vk::DescriptorSet],
     ) {
         unsafe {
             self.device.ffi().cmd_bind_descriptor_sets(
                 self.encoder.cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
+                bind_point,
                 pipeline_layout,
                 first_set, descriptor_sets,
                 &[],
             );
         }
+    }
+
+    pub fn finish(self) {
+        drop(self);
     }
 }
 

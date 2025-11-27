@@ -1,5 +1,5 @@
 use ash::{khr, prelude::VkResult, vk};
-use std::{cell::RefCell, sync::Arc};
+use std::sync::Arc;
 
 use crate as vkl;
 
@@ -11,7 +11,7 @@ pub struct Blas {
 
 impl Blas {
     pub fn from_triangles(
-        allocator: Arc<RefCell<vkl::DefaultAllocator>>,
+        allocator: vkl::DefaultAllocator,
         device: &vkl::Device,
         queue_types: &[vkl::QueueType],
         build_flags: vk::BuildAccelerationStructureFlagsKHR,
@@ -197,7 +197,7 @@ pub struct Tlas {
 
 impl Tlas {
     pub fn new(
-        allocator: Arc<RefCell<vkl::DefaultAllocator>>,
+        allocator: vkl::DefaultAllocator,
         device: &vkl::Device,
         queue_types: &[vkl::QueueType],
         build_flags: vk::BuildAccelerationStructureFlagsKHR,

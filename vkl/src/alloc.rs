@@ -4,6 +4,8 @@ use std::{
 
 use ash::{prelude::VkResult, vk};
 
+use crate::DefaultAllocator;
+
 use super::{Device, Instance};
 
 pub type AllocHandle = u64;
@@ -408,13 +410,25 @@ impl MemMap<'_> {
             std::ptr::copy(data.as_ptr(), self.ptr as *mut T, data.len());
         }
     }
+
+    pub fn read<T>(&self) -> &[T] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.ptr as *const T,
+                self.size as usize / size_of::<T>()
+            )
+        }
+    }
 }
 
 impl Drop for MemMap<'_> {
     fn drop(&mut self) {
         unsafe {
-            self.buffer.allocator.borrow()
-                .device.unmap_memory(
+            self.buffer.allocator
+                .read()
+                .unwrap()
+                .device
+                .unmap_memory(
                     self.buffer.bound_memory.unwrap().memory
                 );
         }
@@ -422,7 +436,7 @@ impl Drop for MemMap<'_> {
 }
 
 pub struct Buffer {
-    allocator: Arc<RefCell<Allocator>>,
+    allocator: DefaultAllocator,
     buffer: vk::Buffer,
     buffer_size: vk::DeviceSize,
     bound_memory: Option<MemorySlice>,
@@ -430,7 +444,7 @@ pub struct Buffer {
 
 impl Buffer {
     pub fn create(
-        allocator: Arc<RefCell<Allocator>>,
+        allocator: DefaultAllocator,
         device: &Device,
         queue_types: &[super::QueueType],
         buffer_usage: vk::BufferUsageFlags,
@@ -469,7 +483,7 @@ impl Buffer {
     pub fn get_device_address(&self) -> vk::DeviceAddress {
         let buf_addr = vk::BufferDeviceAddressInfo::default()
             .buffer(self.buffer);
-        unsafe { self.allocator.borrow().device.get_buffer_device_address(&buf_addr) }
+        unsafe { self.allocator.read().unwrap().device.get_buffer_device_address(&buf_addr) }
     }
 
     pub fn buffer_size(&self) -> vk::DeviceSize {
@@ -493,10 +507,10 @@ impl Buffer {
             properties: memory_properties,
             alloc_flags,
         };
-        let memory = self.allocator.borrow_mut().get_memory(&req)?;
+        let memory = self.allocator.write().unwrap().get_memory(&req)?;
 
         unsafe {
-            self.allocator.borrow().device
+            self.allocator.read().unwrap().device
                 .bind_buffer_memory(self.buffer, memory.memory, memory.offset())
         }?;
 
@@ -541,7 +555,7 @@ impl Buffer {
     }
 
     pub fn new<'d, T>(
-        allocator: Arc<RefCell<Allocator>>,
+        allocator: DefaultAllocator,
         device: &Device,
         info: &BufferInfo<'d, T>,
     ) -> VkResult<Self> {
@@ -625,7 +639,7 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        let mut allocator = self.allocator.borrow_mut();
+        let mut allocator = self.allocator.write().unwrap();
 
         if let Some(mem) = self.bound_memory.as_ref() {
             allocator.uncommit_memory(mem);
