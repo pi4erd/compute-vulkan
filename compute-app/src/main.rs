@@ -62,14 +62,19 @@ fn main() {
 
     let mut piler = device.create_pipeline_manager();
 
-    let cmd_buffer = device.allocate_command_buffer(
+    let compute_cmd_buffer = device.allocate_command_buffer(
+        vkl::QueueType::Compute,
+        vk::CommandBufferLevel::PRIMARY
+    ).unwrap();
+    
+    let copy_cmd_buffer = device.allocate_command_buffer(
         vkl::QueueType::Compute,
         vk::CommandBufferLevel::PRIMARY
     ).unwrap();
 
     let allocator: vkl::DefaultAllocator = Arc::new(RwLock::new(vkl::Allocator::new(&instance, device)));
 
-    let array = (0..100000).collect::<Vec<_>>();
+    let array = (0..1000000000).collect::<Vec<_>>();
     let buffer = {
         let buffer_info = vkl::BufferInfo {
             data: &array,
@@ -156,7 +161,7 @@ fn main() {
 
     {
         let encoder = device.create_command_encoder(
-            *cmd_buffer,
+            *compute_cmd_buffer,
             vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT
         ).unwrap();
 
@@ -169,23 +174,27 @@ fn main() {
             0,
             &[descriptor_set]
         );
-        compute.dispatch((array.len() as u32, 1, 1));
+        compute.dispatch((array.len() as u32 / 100, 1, 1));
 
         compute.finish();
         encoder.finish();
     }
 
-    let cmd_buffers_to_submit = [*cmd_buffer];
-    let submit_info = vk::SubmitInfo::default()
-        .command_buffers(&cmd_buffers_to_submit);
-    device.queue_submit(
-        vkl::QueueType::Compute,
-        &[submit_info],
-        None
-    ).unwrap();
-    device.queue_wait_idle(vkl::QueueType::Compute).unwrap();
+    let compute_semaphore = device.create_semaphore().unwrap();
+    let compute_semaphores = [*compute_semaphore];
+    let copy_fence = device.create_fence(false).unwrap();
 
-    log::info!("Finished compute!");
+    {
+        let cmd_buffers_to_submit = [*compute_cmd_buffer];
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(&cmd_buffers_to_submit)
+            .signal_semaphores(&compute_semaphores);
+        device.queue_submit(
+            vkl::QueueType::Compute,
+            &[submit_info],
+            None,
+        ).unwrap();
+    }
 
     let mut end_buffer = vkl::Buffer::create(
         allocator.clone(),
@@ -204,24 +213,29 @@ fn main() {
 
     {
         let encoder = device.create_command_encoder(
-            *cmd_buffer,
+            *copy_cmd_buffer,
             vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT
         ).unwrap();
 
         encoder.copy_buffer_full(&buffer, &end_buffer);
     }
 
-    let cmd_buffers_to_submit = [*cmd_buffer];
-    let submit_info = vk::SubmitInfo::default()
-        .command_buffers(&cmd_buffers_to_submit);
-    device.queue_submit(
-        vkl::QueueType::Compute,
-        &[submit_info],
-        None
-    ).unwrap();
-    device.queue_wait_idle(vkl::QueueType::Compute).unwrap();
+    {
+        let cmd_buffers_to_submit = [*copy_cmd_buffer];
+        let wait_dst_stage_mask = [vk::PipelineStageFlags::COMPUTE_SHADER];
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(&cmd_buffers_to_submit)
+            .wait_semaphores(&compute_semaphores)
+            .wait_dst_stage_mask(&wait_dst_stage_mask);
+        device.queue_submit(
+            vkl::QueueType::Compute,
+            &[submit_info],
+            Some(&copy_fence)
+        ).unwrap();
+    }
+    device.wait_for_fences(&[&copy_fence]).unwrap();
 
-    log::info!("Finished copy!");
+    log::info!("Finished compute and copy!");
 
     {
         let map = end_buffer.map(device).unwrap();
@@ -229,7 +243,7 @@ fn main() {
         let result = map.read::<i32>();
 
         assert!(!array.eq(result));
-        
-        log::info!("{:?}", result);
     }
+
+    log::info!("Test successful!");
 }

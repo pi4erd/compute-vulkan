@@ -13,7 +13,8 @@ pub type AllocHandle = u64;
 pub const ALLOCATE_BLOCK_SIZE: u64 = 65536;
 
 fn get_allocation_block_count(size: u64) -> u64 {
-    size / ALLOCATE_BLOCK_SIZE
+    let result_size = size / ALLOCATE_BLOCK_SIZE;
+    result_size
         + if size % ALLOCATE_BLOCK_SIZE != 0 {
             1
         } else {
@@ -113,7 +114,7 @@ impl AllocatedMemory {
             // sanity checks
             // assert because indicates problem with algorithm, not user issue
             assert_eq!(offset % alignment_blocks, 0);
-            if offset + block_count >= self.block_count() {
+            if offset + block_count > self.block_count() {
                 return None
             }
 
