@@ -281,6 +281,56 @@ impl PipelineManager {
         self.pipelines[&handle]
     }
 
+    pub fn create_compute_pipelines(
+        &mut self,
+        infos: &[ComputePipelineInfo]
+    ) -> Result<Vec<PipelineHandle>, (Vec<PipelineHandle>, vk::Result)> {
+        let stages = infos
+            .iter()
+            .map(|info| {
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(info.stage.stage)
+                    .module(info.stage.module.module)
+                    .name(info.stage.entrypoint)
+                    .flags(info.stage.flags)
+            })
+            .collect::<Vec<_>>();
+        let infos = std::iter::zip(infos, stages)
+            .map(|(info, stage)| {
+                vk::ComputePipelineCreateInfo::default()
+                    .layout(self.get_layout(info.layout_ref))
+                    .stage(stage)
+                    .flags(info.flags)
+            })
+            .collect::<Vec<_>>();
+        
+        let mut error: Option<vk::Result> = None;
+        let pipelines = match unsafe {
+            self.device.create_compute_pipelines(
+                vk::PipelineCache::null(),
+                &infos,
+                None,
+            )
+        } {
+            Ok(p) => p,
+            Err((p, e)) => {
+                error = Some(e);
+                p
+            },
+        };
+
+        let handles = pipelines
+            .iter()
+            .map(|p| self.append_pipeline(Pipeline::Compute(*p)))
+            .collect::<Vec<_>>();
+
+        if let Some(error) = error {
+            return Err((handles, error))
+        }
+
+        return Ok(handles)
+    }
+
     pub fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> VkResult<PipelineHandle> {
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(info.stage.stage)
@@ -506,6 +556,43 @@ impl PipelineManager {
         let handle = self.append_pipeline(Pipeline::Render(pipeline));
 
         return Ok(handle);
+    }
+
+    /// Frees pipeline resources.
+    /// 
+    /// **WARNING: Invalidates all references**.
+    pub fn clear(&mut self) {
+        for (_, pipeline) in self.pipelines.iter() {
+            unsafe {
+                self.device
+                    .destroy_pipeline(
+                        pipeline.pipeline(),
+                        None,
+                    );
+            }
+        }
+
+        for (_, layout) in self.layouts.iter() {
+            unsafe {
+                self.device
+                    .destroy_pipeline_layout(*layout, None);
+            }
+        }
+
+        for (_, render_pass) in self.render_passes.iter() {
+            unsafe {
+                self.device
+                    .destroy_render_pass(*render_pass, None);
+            }
+        }
+
+        self.layouts.clear();
+        self.pipelines.clear();
+        self.render_passes.clear();
+
+        self.last_layout = 0;
+        self.last_pipeline = 0;
+        self.last_render_pass = 0;
     }
 
     fn append_pipeline(&mut self, pipeline: Pipeline) -> PipelineHandle {
