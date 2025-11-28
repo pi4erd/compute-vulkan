@@ -44,6 +44,8 @@ use std::{
 };
 
 use ash::{ext, khr, prelude::*};
+
+#[cfg(feature = "window")]
 use winit::{
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
     window::Window,
@@ -180,6 +182,7 @@ impl Instance {
         Ok(())
     }
 
+    #[cfg(feature = "window")]
     pub fn create_surface(&mut self, window: Arc<winit::window::Window>) -> VkResult<()> {
         self.surface = Some(Surface::new(self, window)?);
 
@@ -357,7 +360,9 @@ impl Swapchain {
         let present_modes = surface.get_surface_present_modes(device.physical_device)?;
         let caps = surface.get_surface_caps(device.physical_device)?;
 
-        let extent = Self::pick_extent(&surface.window, &caps);
+        let extent = vk::Extent2D::default()
+            .width(info.width)
+            .height(info.height);
         let present_mode = Self::pick_present_mode(&present_modes, info.preferred_present_mode);
         let surface_format = Self::pick_surface_format(
             &surface_formats,
@@ -475,7 +480,9 @@ impl Swapchain {
         let present_modes = surface.get_surface_present_modes(device.physical_device)?;
         let caps = surface.get_surface_caps(device.physical_device)?;
 
-        let extent = Self::pick_extent(&surface.window, &caps);
+        let extent = vk::Extent2D::default()
+            .width(config.width)
+            .height(config.height);
         let present_mode = Self::pick_present_mode(&present_modes, config.preferred_present_mode);
         let surface_format = Self::pick_surface_format(
             &surface_formats,
@@ -650,7 +657,8 @@ impl Swapchain {
         self.image_views.clear();
     }
 
-    fn pick_extent(window: &Window, caps: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+    #[cfg(feature = "window")]
+    fn pick_extent_from_window(window: &Window, caps: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
         if caps.current_extent.width != u32::MAX && caps.current_extent.height != u32::MAX {
             return caps.current_extent;
         } else {
@@ -710,11 +718,11 @@ impl Drop for Swapchain {
 pub struct Surface {
     loader: khr::surface::Instance,
     surface: vk::SurfaceKHR,
-    window: Arc<winit::window::Window>,
 }
 
 impl Surface {
-    fn new(instance: &Instance, window: Arc<winit::window::Window>) -> VkResult<Self> {
+    #[cfg(feature = "window")]
+    fn from_window(instance: &Instance, window: Arc<winit::window::Window>) -> VkResult<Self> {
         let loader = khr::surface::Instance::new(&instance.entry.0, &instance.instance);
         let surface = unsafe {
             ash_window::create_surface(
@@ -729,7 +737,6 @@ impl Surface {
         Ok(Self {
             loader,
             surface,
-            window,
         })
     }
 
