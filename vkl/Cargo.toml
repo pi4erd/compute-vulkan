@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-static = ["ash/linked"]
+linked = ["ash/linked"]
 window = ["dep:winit"]
 image = ["dep:image"]
 
@@ -13,6 +13,7 @@ image = ["dep:image"]
 ash = "0.38.0"
 ash-window = "0.13.0"
 bitflags = "2.10.0"
+bytemuck = "1.24.0"
 image = { version = "0.25.9", optional = true }
 log = "0.4.28"
 winit = { version = "0.30.12", optional = true }

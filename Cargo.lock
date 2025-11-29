@@ -403,6 +403,7 @@ dependencies = [
 name = "compute-app"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "log",
  "pretty_env_logger",
  "shaderc",
@@ -2093,6 +2094,7 @@ dependencies = [
  "ash",
  "ash-window",
  "bitflags 2.10.0",
+ "bytemuck",
  "image",
  "log",
  "winit",

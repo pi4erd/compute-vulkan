@@ -60,7 +60,7 @@ impl Entry {
         Ok(Self(entry))
     }
 
-    #[cfg(feature = "static")]
+    #[cfg(feature = "linked")]
     pub fn linked() -> Self {
         Self(ash::Entry::linked())
     }
@@ -1668,8 +1668,6 @@ impl Device {
         instance: &ash::Instance,
         required_exts: &[&CStr],
     ) -> Option<vk::PhysicalDevice> {
-        // TODO: Add feature check
-
         let physical_devices = unsafe { instance.enumerate_physical_devices() }.ok()?;
 
         let (mut picked_device, mut max_score) = (None, 0);

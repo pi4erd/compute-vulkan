@@ -3,6 +3,7 @@ use std::{
 };
 
 use ash::{prelude::VkResult, vk};
+use bytemuck::NoUninit;
 
 use crate::DefaultAllocator;
 
@@ -235,7 +236,7 @@ pub struct Allocator {
 }
 
 impl Allocator {
-    pub const DEFAULT_ALLOC_SIZE_BLOCKS: u64 = 400;
+    pub const DEFAULT_ALLOC_SIZE_BLOCKS: u64 = 20;
 
     pub fn new(instance: &Instance, device: &Device) -> Self {
         let memory_properties = unsafe {
@@ -404,21 +405,29 @@ pub struct MemMap<'w> {
 }
 
 impl MemMap<'_> {
-    pub fn write<T>(&mut self, data: &[T]) {
+    pub fn write<T: NoUninit>(&mut self, data: &[T]) {
         assert!(data.len() * size_of::<T>() <= self.size as usize, "Data out of bounds");
+        
+        let bytes: &[u8] = bytemuck::cast_slice(data);
 
         unsafe {
-            std::ptr::copy(data.as_ptr(), self.ptr as *mut T, data.len());
+            std::ptr::copy::<u8>(
+                bytes.as_ptr(),
+                self.ptr as *mut u8,
+                bytes.len()
+            );
         }
     }
 
-    pub fn read<T>(&self) -> &[T] {
-        unsafe {
+    pub fn read<T: bytemuck::AnyBitPattern>(&self) -> &[T] {
+        let bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
-                self.ptr as *const T,
-                self.size as usize / size_of::<T>()
+                self.ptr as *const u8,
+                self.size as usize
             )
-        }
+        };
+
+        bytemuck::cast_slice(bytes)
     }
 }
 
@@ -555,7 +564,7 @@ impl Buffer {
         Ok(())
     }
 
-    pub fn new<'d, T>(
+    pub fn new<'d, T: NoUninit>(
         allocator: DefaultAllocator,
         device: &Device,
         info: &BufferInfo<'d, T>,
@@ -593,7 +602,7 @@ impl Buffer {
         })
     }
 
-    pub fn write_data_staged<T>(
+    pub fn write_data_staged<T: NoUninit>(
         &self,
         device: &Device,
         data: &[T],

@@ -1,14 +1,29 @@
 use std::{error::Error, fs, iter::zip, sync::{Arc, RwLock}};
 
+use bytemuck::NoUninit;
 use vkl::vk;
 use shaderc::{CompilationArtifact, Result as ShaderResult};
 
 extern crate vkl;
 
-struct BatchBufferInfo {
+trait BatchDataTrait {
+    fn get_data_bytes(&self) -> &[u8];
+}
+
+struct BatchData<T: NoUninit> {
+    array: Vec<T>,
+}
+
+impl<T: NoUninit> BatchDataTrait for BatchData<T> {
+    fn get_data_bytes(&self) -> &[u8] {
+        bytemuck::cast_slice(&self.array)
+    }
+}
+
+struct BatchBufferInfo<'a> {
     buffer_binding: u32,
     buffer_size: u64,
-    host_local: bool,
+    input: Option<&'a dyn BatchDataTrait>,
 }
 
 struct BatchCode<'a> {
@@ -18,7 +33,7 @@ struct BatchCode<'a> {
 
 struct BatchInfo<'a> {
     code: &'a [BatchCode<'a>],
-    buffers: &'a [BatchBufferInfo],
+    buffers: &'a [BatchBufferInfo<'a>],
 }
 
 struct ComputeState {    
@@ -142,24 +157,33 @@ impl ComputeState {
         let buffers = batch.buffers
             .iter()
             .map(|b| {
+                let buffer_usage = if b.input.is_none() {
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                } else {
+                    vk::BufferUsageFlags::STORAGE_BUFFER |
+                        vk::BufferUsageFlags::TRANSFER_DST
+                };
                 let mut buffer = vkl::Buffer::create(
                     self.allocator.clone(),
                     self.instance.device(),
                     &[vkl::QueueType::Compute],
-                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                    buffer_usage,
                     vk::BufferCreateFlags::empty(),
                     b.buffer_size
                 )?;
                 buffer.allocate_memory(
                     self.instance.device(),
-                    if b.host_local {
-                        vk::MemoryPropertyFlags::HOST_VISIBLE |
-                            vk::MemoryPropertyFlags::HOST_COHERENT
-                    } else {
-                        vk::MemoryPropertyFlags::DEVICE_LOCAL
-                    },
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
                     vk::MemoryAllocateFlags::empty(),
                 )?;
+
+                if let Some(input) = b.input {
+                    buffer.write_data_staged(
+                        self.instance.device(),
+                        input.get_data_bytes(),
+                    )?;
+                }
+
                 Ok(buffer)
             })
             .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
@@ -296,6 +320,10 @@ fn main() {
         shaderc::ShaderKind::Compute,
     ).expect("Failed to compile shader");
 
+    let data: BatchData<i32> = BatchData {
+        array: (0..100).collect::<Vec<_>>(),
+    };
+
     let batch = BatchInfo {
         code: &[
             BatchCode {
@@ -306,9 +334,14 @@ fn main() {
         buffers: &[
             BatchBufferInfo {
                 buffer_binding: 0,
+                buffer_size: (data.array.len() * size_of::<i32>()) as u64,
+                input: Some(&data),
+            },
+            BatchBufferInfo {
+                buffer_binding: 1,
                 buffer_size: 100,
-                host_local: false,
-            }
+                input: None,
+            },
         ]
     };
 

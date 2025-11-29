@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 log = "0.4.28"
 pretty_env_logger = "0.5.0"
-vkl = { path = "../vkl", features = ["static"] }
+vkl = { path = "../vkl", features = [] }
 shaderc = "0.10"
+bytemuck = "1.24.0"

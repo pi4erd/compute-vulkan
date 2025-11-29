@@ -1,3 +1,5 @@
+compile_error!("Module unsupported");
+
 use ash::{khr, prelude::VkResult, vk};
 use std::sync::Arc;
 

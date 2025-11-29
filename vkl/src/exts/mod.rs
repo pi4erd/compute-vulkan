@@ -1,5 +1,3 @@
-pub mod ray_tracing;
-
 use std::ffi::CStr;
 use std::sync::Arc;
 
