@@ -3,6 +3,7 @@ name = "test_compute"
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/pi4erd/compute-vulkan.git"
+publish = false
 
 [dependencies]
 log = "0.4.28"

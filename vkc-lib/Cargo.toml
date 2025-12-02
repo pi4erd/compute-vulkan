@@ -1,10 +1,12 @@
 [package]
 name = "vkc-lib"
+description = "A simple Vulkan compute library"
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/pi4erd/compute-vulkan.git"
 readme = "README.md"
 license = "MIT"
+publish = true
 
 [dependencies]
 vkl = { version = "0.1.0", path = "../vkl" }
