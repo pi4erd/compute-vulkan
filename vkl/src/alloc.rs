@@ -2,10 +2,10 @@ use std::{
     cell::RefCell, collections::{HashMap, HashSet}, hash::RandomState, os::raw::c_void, sync::Arc
 };
 
-use ash::{prelude::VkResult, vk};
+use ash::vk;
 use bytemuck::NoUninit;
 
-use crate::DefaultAllocator;
+use crate::{DefaultAllocator, VklError, VklResult};
 
 use super::{Device, Instance};
 
@@ -268,10 +268,11 @@ impl Allocator {
         return None;
     }
 
-    pub fn get_memory(&mut self, req: &MemoryRequest) -> VkResult<MemorySlice> {
+    pub fn get_memory(&mut self, req: &MemoryRequest) -> VklResult<MemorySlice> {
         let requested_memory_type = self
             .get_memory_type(req.requirements.memory_type_bits, req.properties)
-            .ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED)?;
+            .ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED)
+            .map_err(|e| VklError::VulkanError(e))?;
 
         let mut available_memory = None;
 
@@ -334,10 +335,11 @@ impl Allocator {
         }
     }
 
-    fn request_memory(&mut self, request: &MemoryRequest) -> VkResult<AllocHandle> {
+    fn request_memory(&mut self, request: &MemoryRequest) -> VklResult<AllocHandle> {
         let memory_type = self
             .get_memory_type(request.requirements.memory_type_bits, request.properties)
-            .ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED)?;
+            .ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED)
+            .map_err(|e| VklError::VulkanError(e))?;
 
         let requested_blocks = get_allocation_block_count(request.requirements.size);
 
@@ -352,7 +354,8 @@ impl Allocator {
             .allocation_size(allocation_size)
             .memory_type_index(memory_type)
             .push_next(&mut alloc_flags);
-        let memory = unsafe { self.device.allocate_memory(&alloc_info, None)? };
+        let memory = unsafe { self.device.allocate_memory(&alloc_info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         let alloc_handle = self.last_alloc;
         self.last_alloc += 1;
@@ -450,6 +453,7 @@ pub struct Buffer {
     buffer: vk::Buffer,
     buffer_size: vk::DeviceSize,
     bound_memory: Option<MemorySlice>,
+    can_map: bool,
 }
 
 impl Buffer {
@@ -460,7 +464,7 @@ impl Buffer {
         buffer_usage: vk::BufferUsageFlags,
         buffer_flags: vk::BufferCreateFlags,
         size: vk::DeviceSize,
-    ) -> VkResult<Self> {
+    ) -> VklResult<Self> {
         let unique_queue_family_indices = queue_types
             .iter()
             .map(|&q| device.queue_families.get(q).unwrap().id)
@@ -478,7 +482,8 @@ impl Buffer {
             .size(size)
             .usage(buffer_usage)
             .flags(buffer_flags);
-        let buffer = unsafe { device.ffi().create_buffer(&buffer_info, None)? };
+        let buffer = unsafe { device.ffi().create_buffer(&buffer_info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         log::debug!("Created buffer with size {}", size);
 
@@ -487,6 +492,7 @@ impl Buffer {
             buffer,
             bound_memory: None,
             buffer_size: size,
+            can_map: false,
         })
     }
 
@@ -505,7 +511,7 @@ impl Buffer {
         device: &Device,
         memory_properties: vk::MemoryPropertyFlags,
         alloc_flags: vk::MemoryAllocateFlags,
-    ) -> VkResult<()> {
+    ) -> VklResult<()> {
         let memory_requirements = unsafe {
             device
                 .ffi()
@@ -522,16 +528,19 @@ impl Buffer {
         unsafe {
             self.allocator.read().unwrap().device
                 .bind_buffer_memory(self.buffer, memory.memory, memory.offset())
-        }?;
+        }.map_err(|e| VklError::VulkanError(e))?;
 
         self.bound_memory = Some(memory);
+
+        self.can_map = memory_properties.contains(vk::MemoryPropertyFlags::HOST_COHERENT) &&
+            memory_properties.contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
 
         log::trace!("Bound memory ({:?}) offset {}.", memory.memory, memory.offset());
 
         return Ok(())
     }
 
-    pub fn copy_buffer(&self, device: &Device, dst: &Buffer) -> VkResult<()> {
+    pub fn copy_buffer(&self, device: &Device, dst: &Buffer) -> VklResult<()> {
         let transfer_cmd = device.allocate_command_buffer(
             super::QueueType::Transfer,
             vk::CommandBufferLevel::PRIMARY,
@@ -568,7 +577,7 @@ impl Buffer {
         allocator: DefaultAllocator,
         device: &Device,
         info: &BufferInfo<'d, T>,
-    ) -> VkResult<Self> {
+    ) -> VklResult<Self> {
         let size = (info.data.len() * size_of::<T>()) as u64;
         let mut buffer = Self::create(
             allocator.clone(),
@@ -586,15 +595,20 @@ impl Buffer {
         return Ok(buffer);
     }
 
-    pub fn map<'w>(&'w self, device: &Device) -> VkResult<MemMap<'w>> {
+    pub fn map<'w>(&'w self, device: &Device) -> VklResult<MemMap<'w>> {
+        if !self.can_map {
+            return Err(VklError::BufferMapUnsupported)
+        }
+
         let map = unsafe {
             device.ffi().map_memory(
                 self.bound_memory.unwrap().memory,
                 self.bound_memory.unwrap().offset(),
                 self.bound_memory.unwrap().size,
                 vk::MemoryMapFlags::empty(),
-            )?
-        };
+            )
+        }.map_err(|e| VklError::VulkanError(e))?;
+
         Ok(MemMap {
             buffer: self,
             size: self.buffer_size,
@@ -606,7 +620,7 @@ impl Buffer {
         &self,
         device: &Device,
         data: &[T],
-    ) -> VkResult<()> {
+    ) -> VklResult<()> {
         let size = (size_of::<T>() * data.len()) as u64;
         let mut transfer_buffer = Self::create(
             self.allocator.clone(),
@@ -677,7 +691,7 @@ impl Texture2d {
         tiling: vk::ImageTiling,
         format: vk::Format,
         image_usage: vk::ImageUsageFlags,
-    ) -> VkResult<Self> {
+    ) -> VklResult<Self> {
         let image_info = vk::ImageCreateInfo::default()
             .extent(extent)
             .array_layers(1)
@@ -691,8 +705,8 @@ impl Texture2d {
             .samples(vk::SampleCountFlags::TYPE_1); // TODO: Multisampling
 
         let image = unsafe {
-            device.ffi().create_image(&image_info, None)?
-        };
+            device.ffi().create_image(&image_info, None)
+        }.map_err(|e| VklError::VulkanError(e))?;
 
         Ok(Self {
             allocator: allocator.clone(),
@@ -705,7 +719,7 @@ impl Texture2d {
         })
     }
 
-    pub fn initialize_for_sampling(&mut self, device: &Device, aspect: vk::ImageAspectFlags) -> VkResult<()> {
+    pub fn initialize_for_sampling(&mut self, device: &Device, aspect: vk::ImageAspectFlags) -> VklResult<()> {
         let subresource_range = vk::ImageSubresourceRange::default()
             .aspect_mask(aspect)
             .base_array_layer(0)
@@ -719,8 +733,8 @@ impl Texture2d {
             .subresource_range(subresource_range);
 
         let view = unsafe {
-            device.ffi().create_image_view(&view_info, None)?
-        };
+            device.ffi().create_image_view(&view_info, None)
+        }.map_err(|e| VklError::VulkanError(e))?;
 
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
@@ -739,8 +753,8 @@ impl Texture2d {
             .min_lod(0.0)
             .max_lod(0.0);
         let sampler = unsafe {
-            device.ffi().create_sampler(&sampler_info, None)?
-        };
+            device.ffi().create_sampler(&sampler_info, None)
+        }.map_err(|e| VklError::VulkanError(e))?;
 
         self.view = Some(view);
         self.sampler = Some(sampler);
@@ -748,7 +762,7 @@ impl Texture2d {
         Ok(())
     }
 
-    pub fn create_depth_texture(instance: &Instance, allocator: Arc<RefCell<Allocator>>, extent: vk::Extent3D) -> VkResult<Self> {
+    pub fn create_depth_texture(instance: &Instance, allocator: Arc<RefCell<Allocator>>, extent: vk::Extent3D) -> VklResult<Self> {
         let mut image = Self::create(
             allocator,
             instance.device(),
@@ -820,7 +834,7 @@ impl Texture2d {
         &mut self,
         properties: vk::MemoryPropertyFlags,
         alloc_flags: vk::MemoryAllocateFlags,
-    ) -> VkResult<()> {
+    ) -> VklResult<()> {
         let mut allocator = self.allocator.borrow_mut();
 
         let reqs = unsafe {
@@ -835,8 +849,8 @@ impl Texture2d {
         let memory = allocator.get_memory(&request)?;
 
         unsafe {
-            allocator.device.bind_image_memory(self.image, memory.memory, memory.offset())?
-        };
+            allocator.device.bind_image_memory(self.image, memory.memory, memory.offset())
+        }.map_err(|e| VklError::VulkanError(e))?;
         self.bound_memory = Some(memory);
 
         Ok(())
@@ -848,7 +862,7 @@ impl Texture2d {
         device: &Device,
         bytes: &[u8],
         image_usage: vk::ImageUsageFlags,
-    ) -> VkResult<Self> {
+    ) -> VklResult<Self> {
         let image = image::load_from_memory(bytes)
             .map_err(|_| todo!("handle error"))?;
 

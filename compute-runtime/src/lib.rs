@@ -1,17 +1,15 @@
-use std::{error::Error, fs, iter::zip, sync::{Arc, RwLock}};
+use std::{error::Error, iter::zip, sync::{Arc, RwLock}};
 
 use bytemuck::NoUninit;
-use vkl::vk;
+use vkl::{VklResult, vk};
 use shaderc::{CompilationArtifact, Result as ShaderResult};
 
-extern crate vkl;
-
-trait BatchDataTrait {
+pub trait BatchDataTrait {
     fn get_data_bytes(&self) -> &[u8];
 }
 
-struct BatchData<T: NoUninit> {
-    array: Vec<T>,
+pub struct BatchData<T: NoUninit> {
+    pub array: Vec<T>,
 }
 
 impl<T: NoUninit> BatchDataTrait for BatchData<T> {
@@ -20,23 +18,24 @@ impl<T: NoUninit> BatchDataTrait for BatchData<T> {
     }
 }
 
-struct BatchBufferInfo<'a> {
-    buffer_binding: u32,
-    buffer_size: u64,
-    input: Option<&'a dyn BatchDataTrait>,
+pub struct BatchBufferInfo<'a> {
+    pub buffer_binding: u32,
+    pub buffer_size: u64,
+    pub input: Option<&'a dyn BatchDataTrait>,
+    pub host_mapped: bool,
 }
 
-struct BatchCode<'a> {
-    code: &'a [u8],
-    batch_group_count: (u32, u32, u32),
+pub struct BatchCode<'a> {
+    pub code: &'a [u8],
+    pub batch_group_count: (u32, u32, u32),
 }
 
-struct BatchInfo<'a> {
-    code: &'a [BatchCode<'a>],
-    buffers: &'a [BatchBufferInfo<'a>],
+pub struct BatchInfo<'a> {
+    pub code: &'a [BatchCode<'a>],
+    pub buffers: &'a [BatchBufferInfo<'a>],
 }
 
-struct ComputeState {    
+pub struct ComputeState {
     piler: vkl::PipelineManager,
     allocator: vkl::DefaultAllocator,
 
@@ -118,7 +117,57 @@ impl ComputeState {
         })
     }
 
-    fn dispatch_compute(&mut self, batch: BatchInfo) -> Result<(), Box<dyn Error>> {
+    fn new_buffer_from_info(&self, info: &BatchBufferInfo) -> VklResult<vkl::Buffer> {
+        let buffer_usage = if info.input.is_none() {
+            vk::BufferUsageFlags::STORAGE_BUFFER
+        } else {
+            vk::BufferUsageFlags::STORAGE_BUFFER |
+                vk::BufferUsageFlags::TRANSFER_DST
+        };
+        let mut buffer = vkl::Buffer::create(
+            self.allocator.clone(),
+            self.instance.device(),
+            &[vkl::QueueType::Compute],
+            buffer_usage,
+            vk::BufferCreateFlags::empty(),
+            info.buffer_size
+        )?;
+        buffer.allocate_memory(
+            self.instance.device(),
+            if !info.host_mapped {
+                vk::MemoryPropertyFlags::DEVICE_LOCAL
+            } else {
+                vk::MemoryPropertyFlags::HOST_COHERENT |
+                    vk::MemoryPropertyFlags::HOST_VISIBLE
+            },
+            vk::MemoryAllocateFlags::empty(),
+        )?;
+
+        if let Some(input) = info.input {
+            buffer.write_data_staged(
+                self.instance.device(),
+                input.get_data_bytes(),
+            )?;
+        }
+
+        Ok(buffer)
+    }
+
+    pub fn prepare_buffers(&self, batch: &BatchInfo) -> VklResult<Vec<vkl::Buffer>> {
+        batch.buffers
+            .iter()
+            .map(|b| Ok(self.new_buffer_from_info(b)?))
+            .collect::<VklResult<Vec<_>>>()
+    }
+
+    pub fn map_buffer<'a>(&'a self, buffer: &'a vkl::Buffer) -> VklResult<vkl::MemMap<'a>> {
+        buffer.map(self.instance.device())
+    }
+
+    pub fn dispatch_compute(&mut self, batch: &BatchInfo, buffers: &[vkl::Buffer]) -> VklResult<()> {
+        // TODO: Optimize dispatch compute by only performing the dispatch task here
+        // without needless allocations. 
+        // Probably will need some kind of shared descriptor pool management?
         let pool = {
             let pool_sizes = [
                 vk::DescriptorPoolSize::default()
@@ -154,40 +203,6 @@ impl ComputeState {
 
         let descriptor_set = pool.allocate_descriptor_set(&descriptor_set_layout)?;
 
-        let buffers = batch.buffers
-            .iter()
-            .map(|b| {
-                let buffer_usage = if b.input.is_none() {
-                    vk::BufferUsageFlags::STORAGE_BUFFER
-                } else {
-                    vk::BufferUsageFlags::STORAGE_BUFFER |
-                        vk::BufferUsageFlags::TRANSFER_DST
-                };
-                let mut buffer = vkl::Buffer::create(
-                    self.allocator.clone(),
-                    self.instance.device(),
-                    &[vkl::QueueType::Compute],
-                    buffer_usage,
-                    vk::BufferCreateFlags::empty(),
-                    b.buffer_size
-                )?;
-                buffer.allocate_memory(
-                    self.instance.device(),
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                    vk::MemoryAllocateFlags::empty(),
-                )?;
-
-                if let Some(input) = b.input {
-                    buffer.write_data_staged(
-                        self.instance.device(),
-                        input.get_data_bytes(),
-                    )?;
-                }
-
-                Ok(buffer)
-            })
-            .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-
         {
             let buffer_infos = buffers
                 .iter()
@@ -220,7 +235,7 @@ impl ComputeState {
                 let module = self.piler.create_shader_module(code.code)?;
                 Ok(module)
             })
-            .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+            .collect::<VklResult<Vec<_>>>()?;
         let compute_pipelines = shader_modules
             .into_iter()
             .map(|shader_module| {
@@ -238,7 +253,7 @@ impl ComputeState {
                 let pipeline = self.piler.create_compute_pipeline(&pipeline_info)?;
                 Ok(pipeline)
             })
-            .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+            .collect::<VklResult<Vec<_>>>()?;
 
         let cmd_buffer = self.instance
             .device()
@@ -285,7 +300,7 @@ impl ComputeState {
     }
 }
 
-fn compile_shader(filename: &str, code: &str, shader_kind: shaderc::ShaderKind) -> ShaderResult<CompilationArtifact> {
+pub fn compile_shader(filename: &str, code: &str, shader_kind: shaderc::ShaderKind) -> ShaderResult<CompilationArtifact> {
     let compiler = shaderc::Compiler::new()?; 
 
     compiler.compile_into_spirv(
@@ -295,59 +310,4 @@ fn compile_shader(filename: &str, code: &str, shader_kind: shaderc::ShaderKind) 
         "main",
         None
     )
-}
-
-fn main() {
-    pretty_env_logger::init();
-
-    let debug = cfg!(debug_assertions);
-
-    let mut state = ComputeState::new(debug)
-        .expect("Failed to initialize Vulkan compute instance");
-    
-    let mut args = std::env::args();
-
-    let _program_name = args.next().unwrap();
-    let input_shader_path = args.next()
-        .expect("No input shader path provided");
-
-    let code_text = fs::read_to_string(&input_shader_path)
-        .expect("Failed to read shader from path");
-    
-    let code_binary = compile_shader(
-        &input_shader_path,
-        &code_text,
-        shaderc::ShaderKind::Compute,
-    ).expect("Failed to compile shader");
-
-    let data: BatchData<i32> = BatchData {
-        array: (0..100).collect::<Vec<_>>(),
-    };
-
-    let batch = BatchInfo {
-        code: &[
-            BatchCode {
-                code: code_binary.as_binary_u8(),
-                batch_group_count: (1, 1, 1),
-            }
-        ],
-        buffers: &[
-            BatchBufferInfo {
-                buffer_binding: 0,
-                buffer_size: (data.array.len() * size_of::<i32>()) as u64,
-                input: Some(&data),
-            },
-            BatchBufferInfo {
-                buffer_binding: 1,
-                buffer_size: 100,
-                input: None,
-            },
-        ]
-    };
-
-    state
-        .dispatch_compute(batch)
-        .expect("Failed to execute batch");
-
-    println!("Finished batch execution!");
 }

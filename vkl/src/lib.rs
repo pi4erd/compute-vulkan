@@ -51,11 +51,56 @@ use winit::{
     window::Window,
 };
 
+#[derive(Debug)]
+pub enum VklError {
+    VulkanError(vk::Result),
+    VulkanLoadFailed(ash::LoadingError),
+    MissingExtensions {
+        extensions: Vec<String>,
+    },
+    MissingLayers {
+        layers: Vec<String>,
+    },
+    NoSuitableDevice,
+    BufferMapUnsupported,
+    Custom(Box<dyn std::error::Error>),
+}
+
+impl std::fmt::Display for VklError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VklError::VulkanError(err) => write!(f, "Vulkan Error: {}", err),
+            VklError::VulkanLoadFailed(err) => write!(f, "Failed to load vulkan: {}", err),
+            VklError::MissingExtensions { extensions } => {
+                write!(f, "Missing required extensions ({}):\n", extensions.len())?;
+                for ext in extensions {
+                    write!(f, " - {}", ext)?;
+                }
+                Ok(())
+            }
+            VklError::MissingLayers { layers } => {
+                write!(f, "Missing required layers ({}):\n", layers.len())?;
+                for layer in layers {
+                    write!(f, " - {}", layer)?;
+                }
+                Ok(())
+            }
+            VklError::NoSuitableDevice => write!(f, "No suitable device found!"),
+            VklError::BufferMapUnsupported => write!(f, "Buffer created doesn't support map"),
+            VklError::Custom(err) => write!(f, "Error: {}", err),
+        }
+    }
+}
+impl std::error::Error for VklError {}
+
+pub type VklResult<T> = Result<T, VklError>;
+
 pub struct Entry(ash::Entry);
 
 impl Entry {
-    pub fn dynamic() -> Result<Self, ash::LoadingError> {
-        let entry = unsafe { ash::Entry::load() }?;
+    pub fn dynamic() -> VklResult<Self> {
+        let entry = unsafe { ash::Entry::load() }
+            .map_err(|e| VklError::VulkanLoadFailed(e))?;
 
         Ok(Self(entry))
     }
@@ -84,22 +129,24 @@ impl Instance {
         mut extensions: Vec<&CStr>,
         layers: Vec<&CStr>,
         portability: bool,
-    ) -> VkResult<Self> {
-        let available_extensions = unsafe { entry.0.enumerate_instance_extension_properties(None)? };
-        let available_layers = unsafe { entry.0.enumerate_instance_layer_properties()? };
+    ) -> VklResult<Self> {
+        let available_extensions = unsafe { entry.0.enumerate_instance_extension_properties(None) }
+            .map_err(|e| VklError::VulkanError(e))?;
+        let available_layers = unsafe { entry.0.enumerate_instance_layer_properties() }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         if portability {
             extensions.push(khr::portability_enumeration::NAME);
         }
 
-        if !Self::check_extensions(&extensions, &available_extensions) {
+        if let Err(extensions) = Self::check_extensions(&extensions, &available_extensions) {
             log::error!("One or more required extensions wasn't found!");
-            return Err(vk::Result::ERROR_EXTENSION_NOT_PRESENT);
+            return Err(VklError::MissingExtensions { extensions });
         }
 
-        if !Self::check_layers(&layers, &available_layers) {
+        if let Err(layers) = Self::check_layers(&layers, &available_layers) {
             log::error!("One or more required layers wasn't found!");
-            return Err(vk::Result::ERROR_LAYER_NOT_PRESENT);
+            return Err(VklError::MissingLayers { layers });
         }
 
         let enabled_extensions = extensions.iter().map(|e| e.as_ptr()).collect::<Vec<_>>();
@@ -120,7 +167,8 @@ impl Instance {
                 vk::InstanceCreateFlags::default()
             });
 
-        let instance = unsafe { entry.0.create_instance(&instance_info, None) }?;
+        let instance = unsafe { entry.0.create_instance(&instance_info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         log::info!("Created instance with {} extensions:", extensions.len());
         extensions.iter().for_each(|e| log::info!(" - {:?}", e));
@@ -144,7 +192,7 @@ impl Instance {
         &mut self,
         mut extensions: DeviceExtensions,
         features: DeviceFeatures,
-    ) -> VkResult<()> {
+    ) -> VklResult<()> {
         if self.portability {
             extensions.khr_portability_subset = true;
         }
@@ -152,7 +200,7 @@ impl Instance {
         let ext_vec = extensions.to_vec();
 
         let physical_device = Device::pick_physical_device(&self.instance, &ext_vec)
-            .ok_or(vk::Result::ERROR_INCOMPATIBLE_DRIVER)?;
+            .ok_or(VklError::NoSuitableDevice)?;
 
         let queue_families =
             QueueFamilies::new(&self.instance, self.surface.as_ref(), physical_device);
@@ -183,8 +231,11 @@ impl Instance {
     }
 
     #[cfg(feature = "window")]
-    pub fn create_surface(&mut self, window: Arc<winit::window::Window>) -> VkResult<()> {
-        self.surface = Some(Surface::new(self, window)?);
+    pub fn create_surface(&mut self, window: Arc<winit::window::Window>) -> VklResult<()> {
+        self.surface = Some(
+            Surface::new(self, window)
+                .map_err(|e| VklError::VulkanError(e))?
+        );
 
         Ok(())
     }
@@ -232,7 +283,7 @@ impl Instance {
         severity: DebugUtilsMessageSeverity,
         types: DebugUtilsMessageType,
         callback: DebugCallback,
-    ) -> VkResult<()> {
+    ) -> VklResult<()> {
         unsafe { USER_DEBUG_CALLBACK = Some(callback) };
         let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
             .message_severity(severity.into())
@@ -259,13 +310,14 @@ impl Instance {
         self.device.as_mut().unwrap()
     }
 
-    fn check_extensions(required: &[&CStr], available: &[vk::ExtensionProperties]) -> bool {
+    fn check_extensions(required: &[&CStr], available: &[vk::ExtensionProperties]) -> Result<(), Vec<String>> {
         log::debug!("Available instance extensions ({}):", available.len());
         available.iter().for_each(|l| {
             log::debug!(" - {:?}", l.extension_name_as_c_str().unwrap());
         });
 
-        let mut all_found = true;
+        let mut not_found: Vec<String> = Vec::new();
+
         for &required_ext in required {
             let mut found = false;
             for available_ext in available {
@@ -276,21 +328,26 @@ impl Instance {
             }
 
             if !found {
-                all_found = false;
+                not_found.push(required_ext.to_string_lossy().to_string());
                 log::error!("Unsupported extension: {:?}", required_ext);
             }
         }
 
-        all_found
+        if !not_found.is_empty() {
+            return Err(not_found)
+        }
+
+        Ok(())
     }
 
-    fn check_layers(required: &[&CStr], available: &[vk::LayerProperties]) -> bool {
+    fn check_layers(required: &[&CStr], available: &[vk::LayerProperties]) -> Result<(), Vec<String>> {
         log::debug!("Available instance layers ({}):", available.len());
         available.iter().for_each(|l| {
             log::debug!(" - {:?}", l.layer_name_as_c_str().unwrap());
         });
 
-        let mut all_found = true;
+        let mut not_found: Vec<String> = Vec::new();
+
         for &required_layer in required {
             let mut found = false;
             for available_layer in available {
@@ -301,12 +358,16 @@ impl Instance {
             }
 
             if !found {
-                all_found = false;
+                not_found.push(required_layer.to_string_lossy().to_string());
                 log::error!("Unsupported layer: {:?}", required_layer);
             }
         }
 
-        all_found
+        if !not_found.is_empty() {
+            return Err(not_found)
+        }
+
+        Ok(())
     }
 }
 
@@ -353,7 +414,7 @@ impl Swapchain {
         device: &Device,
         surface: &Surface,
         info: &SwapchainInfo,
-    ) -> VkResult<Self> {
+    ) -> VklResult<Self> {
         let loader = device.loaders.khr_swapchain.as_ref().expect("Extension not loaded").clone();
 
         let surface_formats = surface.get_surface_formats(device.physical_device)?;
@@ -388,7 +449,8 @@ impl Swapchain {
             info.composite_alpha,
         )?;
 
-        let images = unsafe { loader.get_swapchain_images(swapchain)? };
+        let images = unsafe { loader.get_swapchain_images(swapchain) }
+            .map_err(|e| VklError::VulkanError(e))?;
         let image_views = Self::create_image_views(device, &images, surface_format.format)?;
 
         Ok(Self {
@@ -410,7 +472,7 @@ impl Swapchain {
         &mut self,
         depth_attachment: Option<vk::ImageView>,
         render_pass: vk::RenderPass,
-    ) -> VkResult<Rc<[vk::Framebuffer]>> {
+    ) -> VklResult<Rc<[vk::Framebuffer]>> {
         // TODO: Deprecate this and make users create fbs themselves
         let framebuffers = self
             .image_views
@@ -434,7 +496,8 @@ impl Swapchain {
                     .render_pass(render_pass);
                 unsafe { self.device.create_framebuffer(&framebuffer_info, None) }
             })
-            .collect::<VkResult<Rc<[_]>>>()?;
+            .collect::<VkResult<Rc<[_]>>>()
+            .map_err(|e| VklError::VulkanError(e))?;
 
         self.framebuffers = Some(framebuffers.clone());
         Ok(framebuffers)
@@ -445,7 +508,7 @@ impl Swapchain {
         &self,
         sema: Option<&Semaphore>,
         fence: Option<&Fence>,
-    ) -> VkResult<(u32, bool)> {
+    ) -> VklResult<(u32, bool)> {
         unsafe {
             self.loader.acquire_next_image(
                 self.swapchain,
@@ -460,7 +523,7 @@ impl Swapchain {
                 } else {
                     vk::Fence::null()
                 },
-            )
+            ).map_err(|e| VklError::VulkanError(e))
         }
     }
 
@@ -469,8 +532,9 @@ impl Swapchain {
         device: &Device,
         surface: &Surface,
         config: &SwapchainInfo,
-    ) -> VkResult<()> {
-        unsafe { self.device.device_wait_idle()? };
+    ) -> VklResult<()> {
+        unsafe { self.device.device_wait_idle() }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         self.destroy_framebuffers();
         self.destroy_image_views();
@@ -508,7 +572,8 @@ impl Swapchain {
             config.composite_alpha,
         )?;
 
-        let images = unsafe { self.loader.get_swapchain_images(swapchain)? };
+        let images = unsafe { self.loader.get_swapchain_images(swapchain) }
+            .map_err(|e| VklError::VulkanError(e))?;
         let image_views = Self::create_image_views(device, &images, surface_format.format)?;
 
         self.swapchain = swapchain;
@@ -539,7 +604,7 @@ impl Swapchain {
         device: &Device,
         image_index: u32,
         wait_semaphores: &[vk::Semaphore],
-    ) -> VkResult<bool> {
+    ) -> VklResult<bool> {
         let images = [image_index];
         let swapchains = [self.swapchain];
         let present_info = vk::PresentInfoKHR::default()
@@ -550,7 +615,7 @@ impl Swapchain {
             self.loader.queue_present(
                 device.get_device_queue(QueueType::Present).unwrap(),
                 &present_info,
-            )
+            ).map_err(|e| VklError::VulkanError(e))
         }
     }
 
@@ -565,7 +630,7 @@ impl Swapchain {
         present_mode: vk::PresentModeKHR,
         caps: &vk::SurfaceCapabilitiesKHR,
         composite_alpha: vk::CompositeAlphaFlagsKHR,
-    ) -> VkResult<vk::SwapchainKHR> {
+    ) -> VklResult<vk::SwapchainKHR> {
         assert!(device.queue_families.is_complete_present());
 
         let graphics_qf = device.queue_families.get(QueueType::Graphics).unwrap();
@@ -595,7 +660,8 @@ impl Swapchain {
             .pre_transform(caps.current_transform)
             .composite_alpha(composite_alpha)
             .clipped(true);
-        let swapchain = unsafe { loader.create_swapchain(&swapchain_info, None) }?;
+        let swapchain = unsafe { loader.create_swapchain(&swapchain_info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         log::debug!(
             "Created swapchain with extent {}x{} with {} images",
@@ -611,7 +677,7 @@ impl Swapchain {
         device: &Device,
         images: &[vk::Image],
         format: vk::Format,
-    ) -> VkResult<Vec<vk::ImageView>> {
+    ) -> VklResult<Vec<vk::ImageView>> {
         images
             .iter()
             .map(|i| {
@@ -636,6 +702,7 @@ impl Swapchain {
                 unsafe { device.ffi().create_image_view(&image_view_info, None) }
             })
             .collect::<VkResult<Vec<_>>>()
+            .map_err(|e| VklError::VulkanError(e))
     }
 
     fn destroy_framebuffers(&self) {
@@ -722,7 +789,7 @@ pub struct Surface {
 
 impl Surface {
     #[cfg(feature = "window")]
-    fn from_window(instance: &Instance, window: Arc<winit::window::Window>) -> VkResult<Self> {
+    fn from_window(instance: &Instance, window: Arc<winit::window::Window>) -> VklResult<Self> {
         let loader = khr::surface::Instance::new(&instance.entry.0, &instance.instance);
         let surface = unsafe {
             ash_window::create_surface(
@@ -731,8 +798,8 @@ impl Surface {
                 window.display_handle().unwrap().as_raw(),
                 window.window_handle().unwrap().as_raw(),
                 None,
-            )?
-        };
+            )
+        }.map_err(|e| VklError::VulkanError(e))?;
 
         Ok(Self {
             loader,
@@ -743,30 +810,33 @@ impl Surface {
     pub fn get_surface_caps(
         &self,
         physical_device: vk::PhysicalDevice,
-    ) -> VkResult<vk::SurfaceCapabilitiesKHR> {
+    ) -> VklResult<vk::SurfaceCapabilitiesKHR> {
         unsafe {
             self.loader
                 .get_physical_device_surface_capabilities(physical_device, self.surface)
+                .map_err(|e| VklError::VulkanError(e))
         }
     }
 
     pub fn get_surface_formats(
         &self,
         physical_device: vk::PhysicalDevice,
-    ) -> VkResult<Vec<vk::SurfaceFormatKHR>> {
+    ) -> VklResult<Vec<vk::SurfaceFormatKHR>> {
         unsafe {
             self.loader
                 .get_physical_device_surface_formats(physical_device, self.surface)
+                .map_err(|e| VklError::VulkanError(e))
         }
     }
 
     pub fn get_surface_present_modes(
         &self,
         physical_device: vk::PhysicalDevice,
-    ) -> VkResult<Vec<vk::PresentModeKHR>> {
+    ) -> VklResult<Vec<vk::PresentModeKHR>> {
         unsafe {
             self.loader
                 .get_physical_device_surface_present_modes(physical_device, self.surface)
+                .map_err(|e| VklError::VulkanError(e))
         }
     }
 }
@@ -783,10 +853,11 @@ pub struct DebugMessenger {
 }
 
 impl DebugMessenger {
-    pub fn new(instance: &Instance, info: &vk::DebugUtilsMessengerCreateInfoEXT) -> VkResult<Self> {
+    pub fn new(instance: &Instance, info: &vk::DebugUtilsMessengerCreateInfoEXT) -> VklResult<Self> {
         let loader = ext::debug_utils::Instance::new(&instance.entry.0, &instance.instance);
 
-        let messenger = unsafe { loader.create_debug_utils_messenger(info, None)? };
+        let messenger = unsafe { loader.create_debug_utils_messenger(info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         log::debug!("Created messenger.");
 
@@ -1058,7 +1129,7 @@ pub struct DescriptorPool {
 }
 
 impl DescriptorPool {
-    pub fn new(device: &Device, pool_sizes: &[vk::DescriptorPoolSize], max_sets: u32, flags: vk::DescriptorPoolCreateFlags) -> VkResult<Self> {
+    pub fn new(device: &Device, pool_sizes: &[vk::DescriptorPoolSize], max_sets: u32, flags: vk::DescriptorPoolCreateFlags) -> VklResult<Self> {
         let info = vk::DescriptorPoolCreateInfo::default()
             .flags(flags)
             .max_sets(max_sets)
@@ -1066,8 +1137,8 @@ impl DescriptorPool {
         
         let pool = unsafe {
             device.ffi()
-                .create_descriptor_pool(&info, None)?
-        };
+                .create_descriptor_pool(&info, None)
+        }.map_err(|e| VklError::VulkanError(e))?;
         
         Ok(Self {
             device: device.device.clone(),
@@ -1081,7 +1152,7 @@ impl DescriptorPool {
         }
     }
 
-    pub fn allocate_descriptor_set(&self, set_layout: &DescriptorSetLayout) -> VkResult<vk::DescriptorSet> {
+    pub fn allocate_descriptor_set(&self, set_layout: &DescriptorSetLayout) -> VklResult<vk::DescriptorSet> {
         let layouts = [set_layout.layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.pool)
@@ -1089,7 +1160,8 @@ impl DescriptorPool {
                 &layouts
             );
         Ok(unsafe {
-            self.device.allocate_descriptor_sets(&alloc_info)?
+            self.device.allocate_descriptor_sets(&alloc_info)
+                .map_err(|e| VklError::VulkanError(e))?
         }[0])
     }
 }
@@ -1108,11 +1180,11 @@ pub struct DescriptorSetLayout {
 }
 
 impl DescriptorSetLayout {
-    pub fn new(device: &Device, info: &vk::DescriptorSetLayoutCreateInfo) -> VkResult<Self> {
+    pub fn new(device: &Device, info: &vk::DescriptorSetLayoutCreateInfo) -> VklResult<Self> {
         let layout = unsafe {
             device.ffi()
-                .create_descriptor_set_layout(info, None)?
-        };
+                .create_descriptor_set_layout(info, None)
+        }.map_err(|e| VklError::VulkanError(e))?;
 
         Ok(Self {
             device: device.device.clone(),
@@ -1139,12 +1211,14 @@ pub struct CommandEncoder<'d> {
 }
 
 impl<'d> CommandEncoder<'d> {
-    pub fn new(device: &'d Device, cmd_buffer: vk::CommandBuffer, flags: vk::CommandBufferUsageFlags) -> VkResult<Self> {
+    pub fn new(device: &'d Device, cmd_buffer: vk::CommandBuffer, flags: vk::CommandBufferUsageFlags) -> VklResult<Self> {
         let info = vk::CommandBufferBeginInfo::default()
             .flags(flags);
         unsafe { 
-            device.ffi().reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())?;
-            device.ffi().begin_command_buffer(cmd_buffer, &info)?;
+            device.ffi().reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| VklError::VulkanError(e))?;
+            device.ffi().begin_command_buffer(cmd_buffer, &info)
+                .map_err(|e| VklError::VulkanError(e))?;
         };
 
         Ok(Self {
@@ -1533,7 +1607,7 @@ impl Device {
         features: DeviceFeatures,
         queue_families: QueueFamilies,
         queue_infos: &[vk::DeviceQueueCreateInfo],
-    ) -> VkResult<Self> {
+    ) -> VklResult<Self> {
         let properties = unsafe {
             instance
                 .instance
@@ -1575,7 +1649,8 @@ impl Device {
         let device = unsafe {
             instance
                 .instance
-                .create_device(physical_device, &device_info, None)?
+                .create_device(physical_device, &device_info, None)
+                .map_err(|e| VklError::VulkanError(e))?
         };
 
         log::info!("Created device with {} extensions:", exts_vec.len());
@@ -1595,7 +1670,8 @@ impl Device {
                 .queue_family_index(qi.queue_family_index)
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
-            let command_pool = unsafe { device.create_command_pool(&command_pool_info, None) }?;
+            let command_pool = unsafe { device.create_command_pool(&command_pool_info, None) }
+                .map_err(|e| VklError::VulkanError(e))?;
 
             command_pools.insert(qi.queue_family_index, command_pool);
         }
@@ -1624,13 +1700,14 @@ impl Device {
         &self,
         surface: &Surface,
         info: &SwapchainInfo,
-    ) -> VkResult<Swapchain> {
+    ) -> VklResult<Swapchain> {
         Swapchain::new(self, surface, info)
     }
 
-    pub fn create_semaphore(&self) -> VkResult<Semaphore> {
+    pub fn create_semaphore(&self) -> VklResult<Semaphore> {
         let sema_info = vk::SemaphoreCreateInfo::default();
-        let semaphore = unsafe { self.device.create_semaphore(&sema_info, None) }?;
+        let semaphore = unsafe { self.device.create_semaphore(&sema_info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         Ok(Semaphore {
             device: self.device.clone(),
@@ -1638,13 +1715,14 @@ impl Device {
         })
     }
 
-    pub fn create_fence(&self, signaled: bool) -> VkResult<Fence> {
+    pub fn create_fence(&self, signaled: bool) -> VklResult<Fence> {
         let fence_info = vk::FenceCreateInfo::default().flags(if signaled {
             vk::FenceCreateFlags::SIGNALED
         } else {
             vk::FenceCreateFlags::default()
         });
-        let fence = unsafe { self.device.create_fence(&fence_info, None) }?;
+        let fence = unsafe { self.device.create_fence(&fence_info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         Ok(Fence {
             device: self.device.clone(),
@@ -1656,7 +1734,7 @@ impl Device {
         &'e self,
         cmd_buffer: vk::CommandBuffer,
         flags: vk::CommandBufferUsageFlags
-    ) -> VkResult<CommandEncoder<'e>> {
+    ) -> VklResult<CommandEncoder<'e>> {
         CommandEncoder::new(self, cmd_buffer, flags)
     }
 
@@ -1729,8 +1807,9 @@ impl Device {
     fn print_device_extensions(
         instance: &ash::Instance,
         device: vk::PhysicalDevice,
-    ) -> VkResult<()> {
-        let available = unsafe { instance.enumerate_device_extension_properties(device) }?;
+    ) -> VklResult<()> {
+        let available = unsafe { instance.enumerate_device_extension_properties(device) }
+            .map_err(|e| VklError::VulkanError(e))?;
         log::debug!("Available device extensions ({}):", available.len());
         available.iter().for_each(|l| {
             log::debug!(" - {:?}", l.extension_name_as_c_str().unwrap());
@@ -1766,7 +1845,7 @@ impl Device {
         &self,
         queue_type: QueueType,
         level: vk::CommandBufferLevel,
-    ) -> VkResult<CommandBuffer> {
+    ) -> VklResult<CommandBuffer> {
         let pool = self
             .get_command_pool(queue_type)
             .expect("Requested command pool wasn't available");
@@ -1775,7 +1854,10 @@ impl Device {
             .command_pool(pool)
             .command_buffer_count(1);
 
-        let buf = unsafe { self.device.allocate_command_buffers(&alloc_info)?[0] };
+        let buf = unsafe {
+            self.device.allocate_command_buffers(&alloc_info)
+                .map_err(|e| VklError::VulkanError(e))?
+        }[0];
 
         Ok(CommandBuffer {
             device: self.device.clone(),
@@ -1789,7 +1871,7 @@ impl Device {
         queue_type: QueueType,
         level: vk::CommandBufferLevel,
         count: usize,
-    ) -> VkResult<CommandBuffers> {
+    ) -> VklResult<CommandBuffers> {
         let pool = self
             .get_command_pool(queue_type)
             .expect("Requested command pool wasn't available");
@@ -1798,7 +1880,8 @@ impl Device {
             .command_pool(pool)
             .command_buffer_count(count as u32);
 
-        let bufs = unsafe { self.device.allocate_command_buffers(&alloc_info)? };
+        let bufs = unsafe { self.device.allocate_command_buffers(&alloc_info) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         Ok(CommandBuffers {
             device: self.device.clone(),
@@ -1812,14 +1895,14 @@ impl Device {
         max_sets: u32,
         pool_sizes: &[vk::DescriptorPoolSize],
         flags: vk::DescriptorPoolCreateFlags
-    ) -> VkResult<DescriptorPool> {
+    ) -> VklResult<DescriptorPool> {
         DescriptorPool::new(self, pool_sizes, max_sets, flags)
     }
 
     pub fn create_descriptor_set_layout(
         &self,
         info: &vk::DescriptorSetLayoutCreateInfo,
-    ) -> VkResult<DescriptorSetLayout> {
+    ) -> VklResult<DescriptorSetLayout> {
         DescriptorSetLayout::new(self, info)
     }
 
@@ -1834,25 +1917,27 @@ impl Device {
         };
     }
 
-    pub fn wait_for_fences(&self, fences: &[&Fence]) -> VkResult<()> {
+    pub fn wait_for_fences(&self, fences: &[&Fence]) -> VklResult<()> {
         unsafe {
             self.device.wait_for_fences(
                 &fences.iter().map(|f| f.fence).collect::<Vec<_>>(),
                 true,
                 u64::MAX,
-            )
+            ).map_err(|e| VklError::VulkanError(e))
         }
     }
 
-    pub fn reset_fences(&self, fences: &[&Fence]) -> VkResult<()> {
+    pub fn reset_fences(&self, fences: &[&Fence]) -> VklResult<()> {
         unsafe {
             self.device
                 .reset_fences(&fences.iter().map(|f| f.fence).collect::<Vec<_>>())
+                .map_err(|e| VklError::VulkanError(e))
         }
     }
 
-    pub fn wait_idle(&self) -> VkResult<()> {
+    pub fn wait_idle(&self) -> VklResult<()> {
         unsafe { self.device.device_wait_idle() }
+            .map_err(|e| VklError::VulkanError(e))
     }
 
     pub fn queue_submit(
@@ -1860,7 +1945,7 @@ impl Device {
         queue_type: QueueType,
         submit_infos: &[vk::SubmitInfo],
         fence: Option<&Fence>,
-    ) -> VkResult<()> {
+    ) -> VklResult<()> {
         unsafe {
             self.device.queue_submit(
                 self.get_device_queue(queue_type).unwrap(),
@@ -1870,14 +1955,15 @@ impl Device {
                 } else {
                     vk::Fence::null()
                 },
-            )
+            ).map_err(|e| VklError::VulkanError(e))
         }
     }
 
-    pub fn queue_wait_idle(&self, queue_type: QueueType) -> VkResult<()> {
+    pub fn queue_wait_idle(&self, queue_type: QueueType) -> VklResult<()> {
         unsafe {
             self.device
                 .queue_wait_idle(self.get_device_queue(queue_type).unwrap())
+                .map_err(|e| VklError::VulkanError(e))
         }
     }
 }

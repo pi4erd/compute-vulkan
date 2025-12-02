@@ -1,6 +1,8 @@
 // Pipeline management module
-use ash::{prelude::VkResult, vk};
+use ash::vk;
 use std::{collections::HashMap, ffi::CStr, io::Cursor, sync::Arc};
+
+use crate::{VklError, VklResult};
 
 pub type PipelineHandle = u64;
 pub type PipelineLayoutHandle = u64;
@@ -29,9 +31,10 @@ pub struct ShaderModule {
 }
 
 impl ShaderModule {
-    fn new(device: Arc<ash::Device>, code: &[u32]) -> VkResult<Self> {
+    fn new(device: Arc<ash::Device>, code: &[u32]) -> VklResult<Self> {
         let module_info = vk::ShaderModuleCreateInfo::default().code(code);
-        let module = unsafe { device.create_shader_module(&module_info, None)? };
+        let module = unsafe { device.create_shader_module(&module_info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         Ok(Self { device, module })
     }
@@ -233,8 +236,9 @@ impl PipelineManager {
     pub fn create_render_pass(
         &mut self,
         info: &vk::RenderPassCreateInfo,
-    ) -> VkResult<RenderPassHandle> {
-        let render_pass = unsafe { self.device.create_render_pass(info, None)? };
+    ) -> VklResult<RenderPassHandle> {
+        let render_pass = unsafe { self.device.create_render_pass(info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         let handle = self.last_render_pass;
         self.last_render_pass += 1;
@@ -244,7 +248,7 @@ impl PipelineManager {
         Ok(handle)
     }
 
-    pub fn create_shader_module(&self, code: &[u8]) -> VkResult<ShaderModule> {
+    pub fn create_shader_module(&self, code: &[u8]) -> VklResult<ShaderModule> {
         let mut reader = Cursor::new(code);
         let code = ash::util::read_spv(&mut reader).expect("Code wasn't 4-byte aligned");
 
@@ -255,11 +259,12 @@ impl PipelineManager {
         &mut self,
         set_layouts: &[vk::DescriptorSetLayout],
         push_constant_ranges: &[vk::PushConstantRange],
-    ) -> VkResult<PipelineLayoutHandle> {
+    ) -> VklResult<PipelineLayoutHandle> {
         let info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(set_layouts)
             .push_constant_ranges(push_constant_ranges);
-        let layout = unsafe { self.device.create_pipeline_layout(&info, None)? };
+        let layout = unsafe { self.device.create_pipeline_layout(&info, None) }
+            .map_err(|e| VklError::VulkanError(e))?;
 
         let handle = self.last_layout;
         self.last_layout += 1;
@@ -331,7 +336,7 @@ impl PipelineManager {
         return Ok(handles)
     }
 
-    pub fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> VkResult<PipelineHandle> {
+    pub fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> VklResult<PipelineHandle> {
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(info.stage.stage)
             .module(info.stage.module.module)
@@ -353,7 +358,7 @@ impl PipelineManager {
             Err((_, e)) => {
                 Err(e)
             }
-        }?;
+        }.map_err(|e| VklError::VulkanError(e))?;
 
         let handle = self.append_pipeline(Pipeline::Compute(pipeline));
         
@@ -363,7 +368,7 @@ impl PipelineManager {
     pub fn create_graphics_pipeline(
         &mut self,
         info: &GraphicsPipelineInfo,
-    ) -> VkResult<PipelineHandle> {
+    ) -> VklResult<PipelineHandle> {
         let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .flags(info.flags);
 
@@ -549,7 +554,7 @@ impl PipelineManager {
                 None,
             ) {
                 Ok(p) => p[0],
-                Err((_, e)) => return Err(e),
+                Err((_, e)) => return Err(VklError::VulkanError(e)),
             }
         };
 
