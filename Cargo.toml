@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "compute-runtime", "vkl",
+    "vkc-lib", "vkl",
     "examples/*"
 ]

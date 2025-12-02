@@ -1,4 +1,4 @@
-use compute_runtime::*;
+use vkc_lib::*;
 
 fn main() {
     pretty_env_logger::init();

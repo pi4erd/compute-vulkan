@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 log = "0.4.28"
 pretty_env_logger = "0.5.0"
-compute-runtime = { path = "../../compute-runtime" }
+vkc-lib = { path = "../../vkc-lib" }
