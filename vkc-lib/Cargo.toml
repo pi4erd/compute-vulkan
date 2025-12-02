@@ -2,9 +2,12 @@
 name = "vkc-lib"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/pi4erd/compute-vulkan.git"
+readme = "README.md"
+license = "MIT"
 
 [dependencies]
-vkl = { path = "../vkl" }
+vkl = { version = "0.1.0", path = "../vkl" }
 log = "0.4.28"
 pretty_env_logger = "0.5.0"
 shaderc = { version = "0.10", features = ["build-from-source", "prefer-static-linking"] }
