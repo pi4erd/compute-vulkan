@@ -1934,7 +1934,6 @@ dependencies = [
  "compute-runtime",
  "log",
  "pretty_env_logger",
- "shaderc",
 ]
 
 [[package]]

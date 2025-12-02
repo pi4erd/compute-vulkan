@@ -1,3 +1,5 @@
+pub use shaderc;
+
 use std::{error::Error, iter::zip, sync::{Arc, RwLock}};
 
 use bytemuck::NoUninit;
