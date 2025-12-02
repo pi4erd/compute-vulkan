@@ -30,7 +30,7 @@ fn main() {
         buffers: &[
             BatchBufferInfo {
                 buffer_binding: 0,
-                buffer_size: (data.array.len() * size_of::<i32>()) as u64,
+                buffer_size: data.size_of() as u64,
                 input: Some(&data),
                 host_mapped: true,
             },

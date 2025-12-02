@@ -18,6 +18,12 @@ impl<T: NoUninit> BatchDataTrait for BatchData<T> {
     }
 }
 
+impl<T: bytemuck::NoUninit> BatchData<T> {
+    pub fn size_of(&self) -> usize {
+        self.array.len() * size_of::<T>()
+    }
+}
+
 pub struct BatchBufferInfo<'a> {
     pub buffer_binding: u32,
     pub buffer_size: u64,
