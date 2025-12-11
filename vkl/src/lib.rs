@@ -62,7 +62,10 @@ pub enum VklError {
         layers: Vec<String>,
     },
     NoSuitableDevice,
+    NoQueueFamily(QueueType),
     BufferMapUnsupported,
+    NoBoundMemory(String),
+    OtherBufferError(String),
     Custom(Box<dyn std::error::Error>),
 }
 
@@ -85,9 +88,12 @@ impl std::fmt::Display for VklError {
                 }
                 Ok(())
             }
-            VklError::NoSuitableDevice => write!(f, "No suitable device found!"),
+            VklError::NoQueueFamily(family_type) => write!(f, "No requested queue family found for queue type: {:?}", family_type),
+            VklError::NoSuitableDevice => write!(f, "No suitable device found"),
             VklError::BufferMapUnsupported => write!(f, "Buffer created doesn't support map"),
-            VklError::Custom(err) => write!(f, "Error: {}", err),
+            VklError::NoBoundMemory(message) => write!(f, "Buffer didn't have bound memory: {}", message),
+            VklError::OtherBufferError(message) => write!(f, "Buffer error: {}", message),
+            VklError::Custom(err) => write!(f, "Other error: {}", err),
         }
     }
 }
@@ -249,7 +255,7 @@ impl Instance {
         if let Some(callback) = unsafe { USER_DEBUG_CALLBACK } {
             let callback_data = unsafe {
                 callback_data.as_ref()
-            }.unwrap();
+            }.expect("Callback data was null");
 
             let message = unsafe { CStr::from_ptr(callback_data.p_message) };
             let message = message.to_string_lossy();
@@ -295,19 +301,19 @@ impl Instance {
     }
 
     pub fn messenger(&self) -> &DebugMessenger {
-        self.messenger.as_ref().unwrap()
+        self.messenger.as_ref().expect("No debug messenger initialized")
     }
 
     pub fn surface(&self) -> &Surface {
-        self.surface.as_ref().unwrap()
+        self.surface.as_ref().expect("No surface initialized")
     }
 
     pub fn device(&self) -> &Device {
-        self.device.as_ref().unwrap()
+        self.device.as_ref().expect("No device initialized")
     }
 
     pub fn device_mut(&mut self) -> &mut Device {
-        self.device.as_mut().unwrap()
+        self.device.as_mut().expect("No device initialized")
     }
 
     fn check_extensions(required: &[&CStr], available: &[vk::ExtensionProperties]) -> Result<(), Vec<String>> {
@@ -415,7 +421,11 @@ impl Swapchain {
         surface: &Surface,
         info: &SwapchainInfo,
     ) -> VklResult<Self> {
-        let loader = device.loaders.khr_swapchain.as_ref().expect("Extension not loaded").clone();
+        let loader = device.loaders.khr_swapchain.as_ref().ok_or(
+            VklError::MissingExtensions { extensions: vec![
+                vk::KHR_SWAPCHAIN_NAME.to_string_lossy().to_string()
+            ] }
+        )?.clone();
 
         let surface_formats = surface.get_surface_formats(device.physical_device)?;
         let present_modes = surface.get_surface_present_modes(device.physical_device)?;
@@ -613,7 +623,8 @@ impl Swapchain {
             .wait_semaphores(&wait_semaphores);
         unsafe {
             self.loader.queue_present(
-                device.get_device_queue(QueueType::Present).unwrap(),
+                device.get_device_queue(QueueType::Present)
+                    .ok_or(VklError::NoQueueFamily(QueueType::Present))?,
                 &present_info,
             ).map_err(|e| VklError::VulkanError(e))
         }
@@ -633,8 +644,10 @@ impl Swapchain {
     ) -> VklResult<vk::SwapchainKHR> {
         assert!(device.queue_families.is_complete_present());
 
-        let graphics_qf = device.queue_families.get(QueueType::Graphics).unwrap();
-        let present_qf = device.queue_families.get(QueueType::Present).unwrap();
+        let graphics_qf = device.queue_families.get(QueueType::Graphics)
+            .ok_or(VklError::NoQueueFamily(QueueType::Graphics))?;
+        let present_qf = device.queue_families.get(QueueType::Present)
+            .ok_or(VklError::NoQueueFamily(QueueType::Present))?;
 
         let image_sharing_mode;
         let queue_family_indices;
@@ -772,7 +785,7 @@ impl Swapchain {
 
 impl Drop for Swapchain {
     fn drop(&mut self) {
-        unsafe { self.device.device_wait_idle().unwrap() };
+        unsafe { self.device.device_wait_idle().expect("Device wait failed") };
 
         self.destroy_framebuffers();
         self.destroy_image_views();
@@ -1033,7 +1046,7 @@ impl Deref for Semaphore {
 impl Drop for Semaphore {
     fn drop(&mut self) {
         unsafe {
-            self.device.device_wait_idle().unwrap();
+            self.device.device_wait_idle().expect("Device wait failed");
             self.device.destroy_semaphore(self.semaphore, None);
         }
     }
@@ -1055,7 +1068,7 @@ impl Deref for Fence {
 impl Drop for Fence {
     fn drop(&mut self) {
         unsafe {
-            self.device.device_wait_idle().unwrap();
+            self.device.device_wait_idle().expect("Device wait failed");
             self.device.destroy_fence(self.fence, None);
         }
     }
@@ -1117,7 +1130,7 @@ impl Deref for CommandBuffers {
 impl Drop for CommandBuffers {
     fn drop(&mut self) {
         unsafe {
-            self.device.device_wait_idle().unwrap();
+            self.device.device_wait_idle().expect("Device wait failed");
             self.device.free_command_buffers(self.pool, &self.bufs);
         }
     }
@@ -1380,7 +1393,7 @@ impl Drop for CommandEncoder<'_> {
     fn drop(&mut self) {
         unsafe {
             self.device.ffi().end_command_buffer(self.cmd_buffer)
-                .unwrap()
+                .expect("Failed to end command buffer")
         }
     }
 }
@@ -1848,7 +1861,7 @@ impl Device {
     ) -> VklResult<CommandBuffer> {
         let pool = self
             .get_command_pool(queue_type)
-            .expect("Requested command pool wasn't available");
+            .ok_or(VklError::NoQueueFamily(queue_type))?;
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .level(level)
             .command_pool(pool)
@@ -1874,7 +1887,7 @@ impl Device {
     ) -> VklResult<CommandBuffers> {
         let pool = self
             .get_command_pool(queue_type)
-            .expect("Requested command pool wasn't available");
+            .ok_or(VklError::NoQueueFamily(queue_type))?;
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .level(level)
             .command_pool(pool)
@@ -1913,7 +1926,11 @@ impl Device {
     pub fn free_command_buffers(&self, queue_type: QueueType, cmd_buffers: &[vk::CommandBuffer]) {
         unsafe {
             self.device
-                .free_command_buffers(self.get_command_pool(queue_type).unwrap(), cmd_buffers)
+                .free_command_buffers(
+                    self.get_command_pool(queue_type)
+                        .expect("Command pool upon buffer destruction"),
+                    cmd_buffers
+                )
         };
     }
 
@@ -1948,7 +1965,8 @@ impl Device {
     ) -> VklResult<()> {
         unsafe {
             self.device.queue_submit(
-                self.get_device_queue(queue_type).unwrap(),
+                self.get_device_queue(queue_type)
+                    .ok_or(VklError::NoQueueFamily(queue_type))?,
                 submit_infos,
                 if let Some(fence) = fence {
                     **fence
@@ -1962,7 +1980,7 @@ impl Device {
     pub fn queue_wait_idle(&self, queue_type: QueueType) -> VklResult<()> {
         unsafe {
             self.device
-                .queue_wait_idle(self.get_device_queue(queue_type).unwrap())
+                .queue_wait_idle(self.get_device_queue(queue_type).expect("No queue available to wait for"))
                 .map_err(|e| VklError::VulkanError(e))
         }
     }
@@ -1971,7 +1989,7 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         unsafe {
-            self.wait_idle().unwrap();
+            self.wait_idle().expect("Device wait failed");
 
             for (_, &pool) in self.command_pools.iter() {
                 self.device.destroy_command_pool(pool, None);

@@ -250,7 +250,8 @@ impl PipelineManager {
 
     pub fn create_shader_module(&self, code: &[u8]) -> VklResult<ShaderModule> {
         let mut reader = Cursor::new(code);
-        let code = ash::util::read_spv(&mut reader).expect("Code wasn't 4-byte aligned");
+        let code = ash::util::read_spv(&mut reader)
+            .map_err(|e| VklError::Custom(Box::new(e)))?;
 
         Ok(ShaderModule::new(self.device.clone(), &code)?)
     }

@@ -320,9 +320,11 @@ impl Allocator {
     }
 
     fn uncommit_memory(&mut self, mem: &MemorySlice) {
-        let memory = self.allocated_memory.get_mut(&mem.handle).unwrap();
-
-        memory.uncommit(mem);
+        if let Some(memory) = self.allocated_memory.get_mut(&mem.handle) {
+            memory.uncommit(mem);
+        } else {
+            log::warn!("Trying to uncommit memory that wasn't allocated!");
+        }
     }
 
     pub fn print_memory_usage(&self) {
@@ -467,8 +469,12 @@ impl Buffer {
     ) -> VklResult<Self> {
         let unique_queue_family_indices = queue_types
             .iter()
-            .map(|&q| device.queue_families.get(q).unwrap().id)
-            .collect::<HashSet<_, RandomState>>();
+            .map(|&q| {
+                let queue_family = device.queue_families.get(q);
+
+                Ok(queue_family.ok_or(VklError::NoQueueFamily(q))?.id)
+            })
+            .collect::<VklResult<HashSet<u32, RandomState>>>()?;
 
         let queue_family_indices = unique_queue_family_indices.into_iter().collect::<Vec<_>>();
 
@@ -541,6 +547,14 @@ impl Buffer {
     }
 
     pub fn copy_buffer(&self, device: &Device, dst: &Buffer) -> VklResult<()> {
+        let src_memory = self.bound_memory.ok_or(VklError::OtherBufferError(
+            "Source buffer didn't have memory bound".to_string()
+        ))?;
+
+        let dst_memory = dst.bound_memory.ok_or(VklError::OtherBufferError(
+            "Destination buffer didn't have memory bound".to_string()
+        ))?;
+
         let transfer_cmd = device.allocate_command_buffer(
             super::QueueType::Transfer,
             vk::CommandBufferLevel::PRIMARY,
@@ -564,10 +578,10 @@ impl Buffer {
         log::trace!(
             "Wrote {} bytes to memory ({:?}) offset {} from ({:?}) offset {}",
             self.buffer_size,
-            dst.bound_memory.unwrap().memory,
-            dst.bound_memory.unwrap().offset(),
-            self.bound_memory.unwrap().memory,
-            self.bound_memory.unwrap().offset(),
+            dst_memory,
+            dst_memory.offset(),
+            src_memory,
+            src_memory.offset(),
         );
 
         Ok(())
@@ -600,11 +614,15 @@ impl Buffer {
             return Err(VklError::BufferMapUnsupported)
         }
 
+        let memory = self.bound_memory.ok_or(VklError::NoBoundMemory(
+            "Cannot map buffer without bound memory".to_string()
+        ))?;
+
         let map = unsafe {
             device.ffi().map_memory(
-                self.bound_memory.unwrap().memory,
-                self.bound_memory.unwrap().offset(),
-                self.bound_memory.unwrap().size,
+                memory.memory,
+                memory.offset(),
+                memory.size,
                 vk::MemoryMapFlags::empty(),
             )
         }.map_err(|e| VklError::VulkanError(e))?;
@@ -763,12 +781,16 @@ impl Texture2d {
     }
 
     pub fn create_depth_texture(instance: &Instance, allocator: Arc<RefCell<Allocator>>, extent: vk::Extent3D) -> VklResult<Self> {
+        let depth_format = Self::find_depth_format(instance)
+            .ok_or(VklError::Custom(
+                "No suitable depth format found".to_string().into())
+            )?;
         let mut image = Self::create(
             allocator,
             instance.device(),
             extent,
             vk::ImageTiling::OPTIMAL,
-            Self::find_depth_format(instance),
+            depth_format,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
         )?;
         image.allocate_memory(vk::MemoryPropertyFlags::DEVICE_LOCAL, vk::MemoryAllocateFlags::empty())?;
@@ -802,7 +824,7 @@ impl Texture2d {
         None
     }
 
-    fn find_depth_format(instance: &Instance) -> vk::Format {
+    fn find_depth_format(instance: &Instance) -> Option<vk::Format> {
         Self::find_format(
             instance,
             &[
@@ -811,19 +833,19 @@ impl Texture2d {
             ],
             vk::ImageTiling::OPTIMAL,
             vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT,
-        ).unwrap()
+        )
     }
 
     pub fn image(&self) -> vk::Image {
         self.image
     }
 
-    pub fn view(&self) -> vk::ImageView {
-        self.view.expect("View wasn't initialized")
+    pub fn view(&self) -> Option<vk::ImageView> {
+        self.view
     }
 
-    pub fn sampler(&self) -> vk::Sampler {
-        self.sampler.expect("View wasn't initialized")
+    pub fn sampler(&self) -> Option<vk::Sampler> {
+        self.sampler
     }
 
     pub fn format(&self) -> vk::Format {
@@ -964,11 +986,13 @@ impl Texture2d {
         Ok(image)
     }
 
-    pub fn get_description(&self) -> vk::DescriptorImageInfo {
-        vk::DescriptorImageInfo::default()
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image_view(self.view())
-            .sampler(self.sampler())
+    pub fn get_description(&self) -> Option<vk::DescriptorImageInfo> {
+        Some(
+            vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(self.view()?)
+                .sampler(self.sampler()?)
+        )
     }
 }
 
