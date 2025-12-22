@@ -569,8 +569,10 @@ impl Buffer {
             encoder.copy_buffer_full(self, dst);
         }
 
-        let submit_buffers = [*transfer_cmd];
-        let submit_info = vk::SubmitInfo::default().command_buffers(&submit_buffers);
+        let submit_info = super::SubmitInfo {
+            command_buffers: &[&transfer_cmd],
+            ..Default::default()
+        };
 
         device.queue_submit(super::QueueType::Transfer, &[submit_info], None)?;
         device.queue_wait_idle(super::QueueType::Transfer)?;

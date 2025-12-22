@@ -177,33 +177,31 @@ impl ComputeState {
         // without needless allocations. 
         // Probably will need some kind of shared descriptor pool management?
         let pool = {
-            let pool_sizes = [
-                vk::DescriptorPoolSize::default()
-                    .descriptor_count(batch.buffers.len() as u32)
-                    .ty(vk::DescriptorType::STORAGE_BUFFER)
-            ];
             self.instance
                 .device()
                 .create_descriptor_pool(
                     1,
-                    &pool_sizes,
+                    &[
+                        vkl::DescriptorPoolSize {
+                            descriptor_count: batch.buffers.len() as u32,
+                            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                        }
+                    ],
                     vk::DescriptorPoolCreateFlags::empty()
                 )?
         };
 
         let descriptor_set_layout = {
-            let bindings = batch.buffers
-                .iter()
-                .map(|b| {
-                    vk::DescriptorSetLayoutBinding::default()
-                        .binding(b.buffer_binding)
-                        .descriptor_count(1)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                })
-                .collect::<Vec<_>>();
-            let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-                .bindings(&bindings);
+            let layout_info = vkl::DescriptorSetLayoutInfo {
+                bindings: &[
+                    vkl::DescriptorSetLayoutBinding {
+                        descriptor_count: 1,
+                        descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                        stage_flags: vk::ShaderStageFlags::COMPUTE
+                    }
+                ],
+                ..Default::default()
+            };
             self.instance
                 .device()
                 .create_descriptor_set_layout(&layout_info)?
@@ -287,9 +285,10 @@ impl ComputeState {
             }
         }
 
-        let submit_cmd_buffers = [*cmd_buffer];
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(&submit_cmd_buffers);
+        let submit_info = vkl::SubmitInfo {
+            command_buffers: &[&cmd_buffer],
+            ..Default::default()
+        };
         self.instance
             .device()
             .queue_submit(

@@ -1136,17 +1136,36 @@ impl Drop for CommandBuffers {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DescriptorPoolSize {
+    pub descriptor_type: vk::DescriptorType,
+    pub descriptor_count: u32,
+}
+
+impl Into<vk::DescriptorPoolSize> for DescriptorPoolSize {
+    fn into(self) -> vk::DescriptorPoolSize {
+        vk::DescriptorPoolSize::default()
+            .descriptor_count(self.descriptor_count)
+            .ty(self.descriptor_type)
+    }
+}
+
 pub struct DescriptorPool {
     device: Arc<ash::Device>,
     pool: vk::DescriptorPool,
 }
 
 impl DescriptorPool {
-    pub fn new(device: &Device, pool_sizes: &[vk::DescriptorPoolSize], max_sets: u32, flags: vk::DescriptorPoolCreateFlags) -> VklResult<Self> {
+    pub fn new(device: &Device, pool_sizes: &[DescriptorPoolSize], max_sets: u32, flags: vk::DescriptorPoolCreateFlags) -> VklResult<Self> {
+        let pool_sizes = pool_sizes
+            .iter()
+            .map(|&p| p.into())
+            .collect::<Vec<vk::DescriptorPoolSize>>();
+
         let info = vk::DescriptorPoolCreateInfo::default()
             .flags(flags)
             .max_sets(max_sets)
-            .pool_sizes(pool_sizes);
+            .pool_sizes(&pool_sizes);
         
         let pool = unsafe {
             device.ffi()
@@ -1187,16 +1206,43 @@ impl Drop for DescriptorPool {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DescriptorSetLayoutBinding {
+    pub descriptor_count: u32,
+    pub descriptor_type: vk::DescriptorType,
+    pub stage_flags: vk::ShaderStageFlags,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DescriptorSetLayoutInfo<'a> {
+    pub bindings: &'a [DescriptorSetLayoutBinding],
+    pub flags: vk::DescriptorSetLayoutCreateFlags,
+}
+
 pub struct DescriptorSetLayout {
     device: Arc<ash::Device>,
     layout: vk::DescriptorSetLayout,
 }
 
 impl DescriptorSetLayout {
-    pub fn new(device: &Device, info: &vk::DescriptorSetLayoutCreateInfo) -> VklResult<Self> {
+    pub fn new(device: &Device, info: &DescriptorSetLayoutInfo) -> VklResult<Self> {
+        let bindings = info.bindings
+            .iter()
+            .enumerate()
+            .map(|(i, b)|
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(i as u32)
+                    .descriptor_count(b.descriptor_count)
+                    .descriptor_type(b.descriptor_type)
+                    .stage_flags(b.stage_flags)
+            )
+            .collect::<Vec<_>>();
+        let set_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&bindings)
+            .flags(info.flags);
         let layout = unsafe {
             device.ffi()
-                .create_descriptor_set_layout(info, None)
+                .create_descriptor_set_layout(&set_layout_info, None)
         }.map_err(|e| VklError::VulkanError(e))?;
 
         Ok(Self {
@@ -1216,6 +1262,14 @@ impl Drop for DescriptorSetLayout {
             self.device.destroy_descriptor_set_layout(self.layout, None);
         }
     }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct SubmitInfo<'a> {
+    pub command_buffers: &'a [&'a CommandBuffer],
+    pub signal_semaphores: &'a [&'a Semaphore],
+    pub wait_semaphores: &'a [&'a Semaphore],
+    pub wait_dst_stage_mask: &'a [vk::PipelineStageFlags],
 }
 
 pub struct CommandEncoder<'d> {
@@ -1906,7 +1960,7 @@ impl Device {
     pub fn create_descriptor_pool(
         &self,
         max_sets: u32,
-        pool_sizes: &[vk::DescriptorPoolSize],
+        pool_sizes: &[DescriptorPoolSize],
         flags: vk::DescriptorPoolCreateFlags
     ) -> VklResult<DescriptorPool> {
         DescriptorPool::new(self, pool_sizes, max_sets, flags)
@@ -1914,7 +1968,7 @@ impl Device {
 
     pub fn create_descriptor_set_layout(
         &self,
-        info: &vk::DescriptorSetLayoutCreateInfo,
+        info: &DescriptorSetLayoutInfo,
     ) -> VklResult<DescriptorSetLayout> {
         DescriptorSetLayout::new(self, info)
     }
@@ -1960,14 +2014,56 @@ impl Device {
     pub fn queue_submit(
         &self,
         queue_type: QueueType,
-        submit_infos: &[vk::SubmitInfo],
+        submit_infos: &[SubmitInfo],
         fence: Option<&Fence>,
     ) -> VklResult<()> {
+        // How many goddamn allocations are there??
+        let command_buffers = submit_infos
+            .iter()
+            .map(|s|
+                s.command_buffers
+                    .iter()
+                    .map(|c| c.buf)
+                    .collect::<Vec<_>>()
+            )
+            .collect::<Vec<_>>();
+        let wait_semaphores = submit_infos
+            .iter()
+            .map(|s|
+                s.wait_semaphores
+                    .iter()
+                    .map(|s| s.semaphore)
+                    .collect::<Vec<_>>()
+            )
+            .collect::<Vec<_>>();
+        let signal_semaphores = submit_infos
+            .iter()
+            .map(|s|
+                s.signal_semaphores
+                    .iter()
+                    .map(|s| s.semaphore)
+                    .collect::<Vec<_>>()
+            )
+            .collect::<Vec<_>>();
+        let submit_infos = submit_infos.iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let cmds = &command_buffers[i];
+                let signal_semaphores = &signal_semaphores[i];
+                let wait_semaphores = &wait_semaphores[i];
+
+                vk::SubmitInfo::default()
+                    .command_buffers(cmds)
+                    .signal_semaphores(signal_semaphores)
+                    .wait_dst_stage_mask(s.wait_dst_stage_mask)
+                    .wait_semaphores(wait_semaphores)
+            })
+            .collect::<Vec<_>>();
         unsafe {
             self.device.queue_submit(
                 self.get_device_queue(queue_type)
                     .ok_or(VklError::NoQueueFamily(queue_type))?,
-                submit_infos,
+                &submit_infos,
                 if let Some(fence) = fence {
                     **fence
                 } else {
