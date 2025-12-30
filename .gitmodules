@@ -1,0 +1,3 @@
+[submodule "vkl"]
+	path = vkl
+	url = git@github.com:pi4erd/vkl.git

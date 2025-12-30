@@ -9,7 +9,7 @@ license = "MIT"
 publish = true
 
 [dependencies]
-vkl = { version = "0.2.0", path = "../vkl" }
+vkl = { version = "0.2.1", path = "../vkl" }
 log = "0.4.28"
 shaderc = { version = "0.10", features = ["build-from-source", "prefer-static-linking"] }
 bytemuck = "1.24.0"
